@@ -1,0 +1,125 @@
+<!doctype html>
+<html lang="pl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Garaże</title>
+<style>
+:root{--bg:#f4f4f2;--fg:#1a1a1a;--card:#fff;--acc:#1f6feb;--mut:#666;--ok:#1a7f37;--err:#c62828;--bd:#d8d8d4;
+box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+@media (prefers-color-scheme:dark){:root{--bg:#121212;--fg:#eee;--card:#1e1e1e;--acc:#4c8dff;--mut:#999;--ok:#56d364;--err:#ff6b6b;--bd:#333;color-scheme:dark}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);font:16px/1.4 system-ui,sans-serif}
+main{max-width:480px;margin:0 auto;padding:16px}
+h1{font-size:20px;margin:8px 0 16px}
+.card{background:var(--card);border:1px solid var(--bd);border-radius:14px;padding:14px;margin-bottom:14px}
+.open{width:100%;padding:22px 12px;font-size:20px;font-weight:600;border:0;border-radius:12px;background:var(--acc);color:#fff}
+.open:disabled{opacity:.6}
+.row{display:flex;justify-content:space-between;align-items:center;margin-top:8px;font-size:14px}
+.st{min-height:1.3em;margin-top:8px;font-size:14px;color:var(--mut)}
+.st.ok{color:var(--ok)}.st.err{color:var(--err)}
+.del{background:none;border:0;color:var(--mut);text-decoration:underline;font-size:13px;padding:4px}
+input{width:100%;padding:10px;margin:4px 0 10px;border:1px solid var(--bd);border-radius:8px;background:var(--bg);color:var(--fg);font-size:15px}
+label{font-size:13px;color:var(--mut)}
+.add{padding:10px 16px;border:1px solid var(--acc);background:none;color:var(--acc);border-radius:8px;font-size:15px}
+</style>
+</head>
+<body>
+<main>
+<h1>Garaże</h1>
+<div id="list"></div>
+<div class="card">
+  <strong>Dodaj garaż</strong>
+  <div style="margin-top:10px">
+    <label>Nazwa przycisku</label>
+    <input id="n" placeholder="Garaż Dom">
+    <label>Nazwa BLE urządzenia</label>
+    <input id="b" placeholder="ESP-A3F2">
+    <label>Klucz (64 znaki hex)</label>
+    <input id="k" placeholder="np. wynik: openssl rand -hex 32" autocomplete="off">
+    <button class="add" id="addBtn">Zapisz</button>
+    <div class="st" id="addSt"></div>
+  </div>
+</div>
+</main>
+<script>
+const SVC='6e400001-b5a3-f393-e0a9-e50e24dcca9e';
+const CHAL='6e400002-b5a3-f393-e0a9-e50e24dcca9e';
+const RESP='6e400003-b5a3-f393-e0a9-e50e24dcca9e';
+
+let garages=[];
+try{garages=JSON.parse(localStorage.getItem('garages')||'[]');}catch(e){}
+function save(){try{localStorage.setItem('garages',JSON.stringify(garages));}catch(e){}}
+
+const hex2buf=h=>new Uint8Array(h.match(/../g).map(x=>parseInt(x,16)));
+async function hmac(keyHex,data){
+  const k=await crypto.subtle.importKey('raw',hex2buf(keyHex),{name:'HMAC',hash:'SHA-256'},false,['sign']);
+  return new Uint8Array(await crypto.subtle.sign('HMAC',k,data));
+}
+
+async function openGarage(g){
+  const dev=await navigator.bluetooth.requestDevice({filters:[{name:g.ble}],optionalServices:[SVC]});
+  const srv=await dev.gatt.connect();
+  try{
+    const svc=await srv.getPrimaryService(SVC);
+    const ch=await svc.getCharacteristic(CHAL);
+    const dv=await ch.readValue();
+    const nonce=new Uint8Array(dv.buffer,dv.byteOffset,dv.byteLength);
+    const sig=await hmac(g.key,nonce);
+    const rs=await svc.getCharacteristic(RESP);
+    await rs.writeValueWithResponse(sig);
+  }finally{
+    try{dev.gatt.disconnect();}catch(e){}
+  }
+}
+
+function render(){
+  const list=document.getElementById('list');
+  list.textContent='';
+  if(!navigator.bluetooth){
+    const d=document.createElement('div');d.className='card st err';
+    d.textContent='Ta przeglądarka nie obsługuje Web Bluetooth. Użyj Chrome na Androidzie (strona musi być otwarta przez HTTPS).';
+    list.appendChild(d);
+  }
+  garages.forEach((g,i)=>{
+    const c=document.createElement('div');c.className='card';
+    const b=document.createElement('button');b.className='open';b.textContent='Otwórz '+g.name;
+    const st=document.createElement('div');st.className='st';
+    b.onclick=async()=>{
+      b.disabled=true;st.className='st';st.textContent='Łączenie…';
+      try{
+        await openGarage(g);
+        st.className='st ok';st.textContent='Polecenie wysłane';
+      }catch(e){
+        st.className='st err';
+        st.textContent=(e&&e.name==='NotFoundError')?'Nie wybrano urządzenia lub brak w zasięgu':'Błąd: '+(e&&e.message||e);
+      }
+      b.disabled=false;
+    };
+    const row=document.createElement('div');row.className='row';
+    const info=document.createElement('span');info.style.color='var(--mut)';info.textContent=g.ble;
+    const del=document.createElement('button');del.className='del';del.textContent='Usuń';
+    del.onclick=()=>{if(confirm('Usunąć „'+g.name+'”?')){garages.splice(i,1);save();render();}};
+    row.append(info,del);
+    c.append(b,st,row);
+    list.appendChild(c);
+  });
+}
+
+document.getElementById('addBtn').onclick=()=>{
+  const n=document.getElementById('n').value.trim();
+  const b=document.getElementById('b').value.trim();
+  const k=document.getElementById('k').value.trim().toLowerCase();
+  const st=document.getElementById('addSt');
+  if(!n||!b||!/^[0-9a-f]{64}$/.test(k)){
+    st.className='st err';st.textContent='Uzupełnij pola. Klucz musi mieć dokładnie 64 znaki hex.';return;
+  }
+  garages.push({name:n,ble:b,key:k});save();
+  ['n','b','k'].forEach(id=>document.getElementById(id).value='');
+  st.className='st ok';st.textContent='Zapisano';
+  render();
+};
+render();
+</script>
+</body>
+</html>
